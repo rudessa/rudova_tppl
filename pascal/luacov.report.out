@@ -1,0 +1,1213 @@
+==============================================================================
+ast.lua
+==============================================================================
+   11 local AST = {}
+
+   11 function AST.Num(token)
+  373     return {
+  373         type = "Num",
+  373         token = token,
+  373         value = token.value
+  373     }
+      end
+
+   11 function AST.BinOp(left, op, right)
+  205     return {
+  205         type = "BinOp",
+  205         left = left,
+  205         op = op,
+  205         right = right
+  205     }
+      end
+
+   11 function AST.UnaryOp(op, expr)
+   22     return {
+   22         type = "UnaryOp",
+   22         op = op,
+   22         expr = expr
+   22     }
+      end
+
+   11 function AST.Compound()
+  176     return {
+  176         type = "Compound",
+  176         children = {}
+  176     }
+      end
+
+   11 function AST.Assign(left, op, right)
+  220     return {
+  220         type = "Assign",
+  220         left = left,
+  220         op = op,
+  220         right = right
+  220     }
+      end
+
+   11 function AST.Var(token)
+  292     return {
+  292         type = "Var",
+  292         token = token,
+  292         value = token.value
+  292     }
+      end
+
+   11 function AST.NoOp()
+   39     return {
+   39         type = "NoOp"
+   39     }
+      end
+
+   11 return AST
+
+==============================================================================
+interpreter.lua
+==============================================================================
+   11 local Interpreter = {}
+   11 Interpreter.__index = Interpreter
+
+   11 function Interpreter.new(parser, TokenType)
+  102     local self = setmetatable({}, Interpreter)
+  102     self.parser = parser
+  102     self.TokenType = TokenType
+  102     self.GLOBAL_SCOPE = {}
+  102     return self
+      end
+
+   11 function Interpreter:visit(node)
+  784     local method_name = "visit_" .. node.type
+  784     local method = self[method_name]
+  784     if not method then
+    1         error("Undefined methods " .. method_name)
+          end
+  783     return method(self, node)
+      end
+
+   11 function Interpreter:visit_Num(node)
+  272     return node.value
+      end
+
+   11 function Interpreter:visit_BinOp(node)
+  171     local left = self:visit(node.left)
+  168     local right = self:visit(node.right)
+          
+  168     if node.op.type == self.TokenType.PLUS then
+   95         return left + right
+   73     elseif node.op.type == self.TokenType.MINUS then
+   20         return left - right
+   53     elseif node.op.type == self.TokenType.MUL then
+   31         return left * right
+   22     elseif node.op.type == self.TokenType.DIV then
+   22         return left / right
+          end
+      end
+
+   11 function Interpreter:visit_UnaryOp(node)
+   12     local expr = self:visit(node.expr)
+          
+   12     if node.op.type == self.TokenType.PLUS then
+    2         return expr
+   10     elseif node.op.type == self.TokenType.MINUS then
+   10         return -expr
+          end
+      end
+
+   11 function Interpreter:visit_Compound(node)
+  282     for _, child in ipairs(node.children) do
+  173         self:visit(child)
+          end
+      end
+
+   11 function Interpreter:visit_Assign(node)
+  158     local var_name = node.left.value
+  158     local value = self:visit(node.right)
+  151     self.GLOBAL_SCOPE[var_name] = value
+      end
+
+   11 function Interpreter:visit_Var(node)
+   54     local var_name = node.value
+   54     local value = self.GLOBAL_SCOPE[var_name]
+   54     if value == nil then
+    7         error("Variable is undefined: " .. var_name)
+          end
+   47     return value
+      end
+
+   11 function Interpreter:visit_NoOp(node)
+      end
+
+   11 function Interpreter:interpret()
+  102     local tree = self.parser:parse()
+  102     self:visit(tree)
+   94     return self.GLOBAL_SCOPE
+      end
+
+   11 return Interpreter
+
+==============================================================================
+lexer.lua
+==============================================================================
+   11 local Lexer = {}
+   11 Lexer.__index = Lexer
+
+   11 local TokenType = {
+   11     INTEGER = "INTEGER",
+   11     REAL = "REAL",
+   11     PLUS = "PLUS",
+   11     MINUS = "MINUS",
+   11     MUL = "MUL",
+   11     DIV = "DIV",
+   11     LPAREN = "LPAREN",
+   11     RPAREN = "RPAREN",
+   11     ID = "ID",
+   11     ASSIGN = "ASSIGN",
+   11     BEGIN = "BEGIN",
+   11     END = "END",
+   11     SEMI = "SEMI",
+   11     DOT = "DOT",
+   11     EOF = "EOF"
+      }
+
+      local function Token(type, value)
+ 2127     return {type = type, value = value}
+      end
+
+   11 function Lexer.new(text)
+  235     if type(text) ~= "string" then
+    4         error("Lexer.new: text must be a string, got " .. type(text))
+          end
+          
+  231     local self = {}
+  231     setmetatable(self, Lexer)
+          
+  231     self.text = text
+  231     self.pos = 1
+  231     self.current_char = string.len(text) > 0 and string.sub(text, 1, 1) or nil
+          
+  231     return self
+      end
+
+   11 function Lexer:advance()
+ 6358     self.pos = self.pos + 1
+ 6358     if self.pos <= string.len(self.text) then
+ 6158         self.current_char = string.sub(self.text, self.pos, self.pos)
+          else
+  200         self.current_char = nil
+          end
+      end
+
+   11 function Lexer:peek()
+   12     local peek_pos = self.pos + 1
+   12     if peek_pos <= string.len(self.text) then
+    8         return string.sub(self.text, peek_pos, peek_pos)
+          else
+    4         return nil
+          end
+      end
+
+   11 function Lexer:skip_whitespace()
+ 4034     while self.current_char and string.match(self.current_char, "%s") do
+ 2650         self:advance()
+          end
+      end
+
+   11 function Lexer:number()
+  400     local result = ""
+  877     while self.current_char and string.match(self.current_char, "%d") do
+  477         result = result .. self.current_char
+  477         self:advance()
+          end
+          
+  400     if self.current_char == "." then
+   34         result = result .. self.current_char
+   34         self:advance()
+              
+   82         while self.current_char and string.match(self.current_char, "%d") do
+   48             result = result .. self.current_char
+   48             self:advance()
+              end
+              
+   34         return Token(TokenType.REAL, tonumber(result))
+          else
+  366         return Token(TokenType.INTEGER, tonumber(result))
+          end
+      end
+
+   11 function Lexer:_id()
+  706     local result = ""
+ 2716     while self.current_char and string.match(self.current_char, "[%w_]") do
+ 2010         result = result .. self.current_char
+ 2010         self:advance()
+          end
+          
+  706     local upper_result = string.upper(result)
+  706     if upper_result == "BEGIN" then
+  201         return Token(TokenType.BEGIN, upper_result)
+  505     elseif upper_result == "END" then
+  193         return Token(TokenType.END, upper_result)
+          else
+  312         return Token(TokenType.ID, result)
+          end
+      end
+
+   11 function Lexer:get_next_token()
+ 3533     while self.current_char do
+ 3367         if string.match(self.current_char, "%s") then
+ 1384             self:skip_whitespace()
+ 1983         elseif string.match(self.current_char, "%d") then
+  400             return self:number()
+ 1583         elseif string.match(self.current_char, "[%a_]") then
+  706             return self:_id()
+  877         elseif self.current_char == ":" then
+  243             self:advance()
+  272             while self.current_char and string.match(self.current_char, "%s") do
+   29                 self:advance()
+                  end
+  243             if self.current_char == "=" then
+  235                 self:advance()
+  235                 return Token(TokenType.ASSIGN, ":=")
+                  else
+    8                 error("Unresolved symbol: : (expected '=' )")
+                  end
+  634         elseif self.current_char == ";" then
+  102             self:advance()
+  102             return Token(TokenType.SEMI, ";")
+  532         elseif self.current_char == "+" then
+  122             self:advance()
+  122             return Token(TokenType.PLUS, "+")
+  410         elseif self.current_char == "-" then
+   44             self:advance()
+   44             return Token(TokenType.MINUS, "-")
+  366         elseif self.current_char == "*" then
+   49             self:advance()
+   49             return Token(TokenType.MUL, "*")
+  317         elseif self.current_char == "/" then
+   32             self:advance()
+   32             return Token(TokenType.DIV, "/")
+  285         elseif self.current_char == "(" then
+   58             self:advance()
+   58             return Token(TokenType.LPAREN, "(")
+  227         elseif self.current_char == ")" then
+   56             self:advance()
+   56             return Token(TokenType.RPAREN, ")")
+  171         elseif self.current_char == "." then
+  157             self:advance()
+  157             return Token(TokenType.DOT, ".")
+              else
+   14             error("Unresolved symbol " .. self.current_char)
+              end
+          end
+          
+  166     return Token(TokenType.EOF, nil)
+      end
+
+   11 return {
+   11     Lexer = Lexer,
+   11     TokenType = TokenType
+   11 }
+
+==============================================================================
+main.lua
+==============================================================================
+   11 local lexer_module = require("lexer")
+   11 local AST = require("ast")
+   11 local Parser = require("parser")
+   11 local Interpreter = require("interpreter")
+
+   11 local Lexer = lexer_module.Lexer
+   11 local TokenType = lexer_module.TokenType
+
+      local function interpret(text)
+  101     local lexer = Lexer.new(text)
+  101     local parser = Parser.new(lexer, TokenType, AST)
+  101     local interpreter = Interpreter.new(parser, TokenType)
+  101     return interpreter:interpret()
+      end
+
+      local function print_result(variables)
+****0     print("Interpretation result: ")
+****0     print("{")
+****0     for name, value in pairs(variables) do
+****0         print(string.format("  %s = %s", name, tostring(value)))
+          end
+****0     print("}")
+      end
+
+   11 return {
+   11     interpret = interpret,
+   11     print_result = print_result,
+   11     Lexer = Lexer,
+   11     TokenType = TokenType,
+   11     AST = AST,
+   11     Parser = Parser,
+   11     Interpreter = Interpreter
+   11 }
+
+==============================================================================
+parser.lua
+==============================================================================
+   11 local Parser = {}
+   11 Parser.__index = Parser
+
+   11 function Parser.new(lexer, TokenType, AST)
+  175     if type(lexer) ~= "table" then
+    4         error("Parser.new: lexer must be a table, got " .. type(lexer))
+          end
+  171     if type(lexer.get_next_token) ~= "function" then
+    4         error("Parser.new: lexer.get_next_token must be a function")
+          end
+          
+  167     local self = {}
+  167     setmetatable(self, Parser)
+          
+  167     self.lexer = lexer
+  167     self.TokenType = TokenType
+  167     self.AST = AST
+  167     self.current_token = self.lexer:get_next_token()
+          
+  167     return self
+      end
+
+   11 function Parser:eat(token_type)
+ 1813     if self.current_token.type == token_type then
+ 1801         self.current_token = self.lexer:get_next_token()
+          else
+   12         error("Syntax Error:  " .. token_type .. ", got " .. self.current_token.type)
+          end
+      end
+
+   11 function Parser:program()
+  167     local node = self:compound_statement()
+  155     self:eat(self.TokenType.DOT)
+  151     return node
+      end
+
+   11 function Parser:compound_statement()
+  186     self:eat(self.TokenType.BEGIN)
+  186     local nodes = self:statement_list()
+  178     self:eat(self.TokenType.END)
+          
+  174     local root = self.AST.Compound()
+  407     for _, node in ipairs(nodes) do
+  233         table.insert(root.children, node)
+          end
+          
+  174     return root
+      end
+
+   11 function Parser:statement_list()
+  186     local node = self:statement()
+  178     local results = {}
+          
+  178     if node.type ~= "NoOp" then
+  157         table.insert(results, node)
+          end
+          
+  274     while self.current_token.type == self.TokenType.SEMI do
+   96         self:eat(self.TokenType.SEMI)
+   96         node = self:statement()
+   96         if node.type ~= "NoOp" then
+   80             table.insert(results, node)
+              end
+          end
+          
+  178     return results
+      end
+
+   11 function Parser:statement()
+  282     if self.current_token.type == self.TokenType.BEGIN then
+   19         return self:compound_statement()
+  263     elseif self.current_token.type == self.TokenType.ID then
+  226         return self:assignment_statement()
+          else
+   37         return self:empty()
+          end
+      end
+
+   11 function Parser:assignment_statement()
+  226     local left = self:variable()
+  222     local token = self.current_token
+  222     self:eat(self.TokenType.ASSIGN)
+  222     local right = self:expr()
+  218     return self.AST.Assign(left, token, right)
+      end
+
+   11 function Parser:variable()
+  288     local node = self.AST.Var(self.current_token)
+  288     self:eat(self.TokenType.ID)
+  280     return node
+      end
+
+   11 function Parser:empty()
+   37     return self.AST.NoOp()
+      end
+
+   11 function Parser:expr()
+  274     local node = self:term()
+          
+  402     while self.current_token.type == self.TokenType.PLUS or
+  292           self.current_token.type == self.TokenType.MINUS do
+  134         local token = self.current_token
+  134         if token.type == self.TokenType.PLUS then
+  110             self:eat(self.TokenType.PLUS)
+   24         elseif token.type == self.TokenType.MINUS then
+   24             self:eat(self.TokenType.MINUS)
+              end
+  134         node = self.AST.BinOp(node, token, self:term())
+          end
+          
+  268     return node
+      end
+
+   11 function Parser:term()
+  408     local node = self:factor()
+          
+  471     while self.current_token.type == self.TokenType.MUL or
+  428           self.current_token.type == self.TokenType.DIV do
+   69         local token = self.current_token
+   69         if token.type == self.TokenType.MUL then
+   43             self:eat(self.TokenType.MUL)
+   26         elseif token.type == self.TokenType.DIV then
+   26             self:eat(self.TokenType.DIV)
+              end
+   69         node = self.AST.BinOp(node, token, self:factor())
+          end
+          
+  402     return node
+      end
+
+   11 function Parser:factor()
+  497     local token = self.current_token
+          
+  497     if token.type == self.TokenType.PLUS then
+    6         self:eat(self.TokenType.PLUS)
+    6         return self.AST.UnaryOp(token, self:factor())
+  491     elseif token.type == self.TokenType.MINUS then
+   14         self:eat(self.TokenType.MINUS)
+   14         return self.AST.UnaryOp(token, self:factor())
+  477     elseif token.type == self.TokenType.INTEGER then
+  349         self:eat(self.TokenType.INTEGER)
+  349         return self.AST.Num(token)
+  128     elseif token.type == self.TokenType.REAL then
+   14         self:eat(self.TokenType.REAL)
+   14         return self.AST.Num(token)
+  114     elseif token.type == self.TokenType.LPAREN then
+   52         self:eat(self.TokenType.LPAREN)
+   52         local node = self:expr()
+   50         self:eat(self.TokenType.RPAREN)
+   50         return node
+          else
+   62         return self:variable()
+          end
+      end
+
+   11 function Parser:parse()
+  167     local node = self:program()
+  151     if self.current_token.type ~= self.TokenType.EOF then
+    2         error("Error: Unexpected token after program completion")
+          end
+  149     return node
+      end
+
+   11 return Parser
+
+==============================================================================
+run.lua
+==============================================================================
+    3 local main = require("main")
+
+    3 local examples = {
+          {
+    3         name = "Example 1: Empty program",
+              code = [[
+      BEGIN
+      END.
+    3         ]]
+    3     },
+          {
+    3         name = "Example 2: Arithmetic expressions",
+              code = [[
+      BEGIN
+          x:= 2 + 3 * (2 + 3);
+          y:= 2 / 2 - 2 + 3 * ((1 + 1) + (1 + 1))
+      END.
+    3         ]]
+    3     },
+          {
+    3         name = "Example 3: Nested blocks",
+              code = [[
+      BEGIN
+          y: = 2;
+          BEGIN
+              a := 3;
+              a := a;
+              b := 10 + a + 10 * y / 4;
+              c := a - b
+          END;
+          x := 11
+      END.
+    3         ]]
+          }
+    3 }
+
+    3 print("       Pascal Interpreter                ")
+
+   12 for i, example in ipairs(examples) do
+    9     print("\n" .. string.rep("-", 40))
+    9     print(example.name)
+    9     print(string.rep("-", 40))
+    9     print("Program code:")
+    9     print(example.code)
+          
+   18     local success, result = pcall(function()
+    9         return main.interpret(example.code)
+          end)
+          
+    9     if success then
+    9         print("\nExecution result:")
+    9         if next(result) == nil then
+    3             print("  (no variables)")
+              else
+   27             for name, value in pairs(result) do
+   21                 print(string.format("  %s = %s", name, tostring(value)))
+                  end
+              end
+          else
+****0         print("\nERROR during execution:")
+****0         print("  " .. result)
+          end
+      end
+
+==============================================================================
+tests.lua
+==============================================================================
+   11 local main = require("main")
+   11 local interpret = main.interpret
+
+      local function assert_equals(actual, expected, test_name)
+  281     if actual ~= expected then
+   12         error(string.format("Test '%s' failed: expected %s, got %s",
+   31             test_name, tostring(expected), tostring(actual)))
+          end
+  281     print(string.format("OK Test '%s' passed", test_name))
+      end
+
+      local function assert_table_equals(actual, expected, test_name)
+  124     for key, value in pairs(expected) do
+   70         if actual[key] ~= value then
+****0             error(string.format("Test '%s' failed: for variable '%s' expected %s, got %s",
+****0                 test_name, key, tostring(value), tostring(actual[key])))
+              end
+          end
+  124     for key, value in pairs(actual) do
+   70         if expected[key] == nil then
+****0             error(string.format("Test '%s' failed: unexpected variable '%s' with value %s",
+****0                 test_name, key, tostring(value)))
+              end
+          end
+   54     print(string.format("OK Test '%s' passed", test_name))
+      end
+
+      local function assert_error(func, test_name, expected_error_pattern)
+   54     local success, err = pcall(func)
+   54     if success then
+****0         error(string.format("Test '%s' failed: expected error but function succeeded", test_name))
+          end
+   54     if expected_error_pattern and not string.find(tostring(err), expected_error_pattern) then
+    4         error(string.format("Test '%s' failed: expected error containing '%s', got '%s'",
+    2             test_name, expected_error_pattern, tostring(err)))
+          end
+   54     print(string.format("OK Test '%s' passed (error caught)", test_name))
+      end
+
+      local function test_lexer()
+    4     print("\n=== Lexer tests ===")
+    4     local Lexer = main.Lexer
+    4     local TokenType = main.TokenType
+          
+    2     local lexer = Lexer.new("123 45.67")
+    4     local token1 = lexer:get_next_token()
+    4     assert_equals(token1.type, TokenType.INTEGER, "Lexer: integer (type)")
+    4     assert_equals(token1.value, 123, "Lexer: integer (value)")
+          
+    2     local token2 = lexer:get_next_token()
+    6     assert_equals(token2.type, TokenType.REAL, "Lexer: real number (type)")
+    4     assert_equals(token2.value, 45.67, "Lexer: real number (value)")
+          
+          -- Test EOF
+    2     local token3 = lexer:get_next_token()
+    5     assert_equals(token3.type, TokenType.EOF, "Lexer: EOF token")
+          
+          -- Operators
+    3     lexer = Lexer.new("+ - * / := ( ) ; .")
+    5     local ops = {
+    5         {TokenType.PLUS, "+"},
+    5         {TokenType.MINUS, "-"},
+    6         {TokenType.MUL, "*"},
+    6         {TokenType.DIV, "/"},
+    6         {TokenType.ASSIGN, ":="},
+    5         {TokenType.LPAREN, "("},
+    4         {TokenType.RPAREN, ")"},
+    6         {TokenType.SEMI, ";"},
+    6         {TokenType.DOT, "."}
+    7     }
+          
+   22     for i, op in ipairs(ops) do
+   40         local token = lexer:get_next_token()
+   38         assert_equals(token.type, op[1], "Lexer: operator " .. op[2])
+          end
+          
+          -- Keywords
+    2     lexer = Lexer.new("BEGIN END begin end BeGiN eNd")
+    4     assert_equals(lexer:get_next_token().type, TokenType.BEGIN, "Lexer: BEGIN")
+    4     assert_equals(lexer:get_next_token().type, TokenType.END, "Lexer: END")
+    5     assert_equals(lexer:get_next_token().type, TokenType.BEGIN, "Lexer: begin (lowercase)")
+    5     assert_equals(lexer:get_next_token().type, TokenType.END, "Lexer: end (lowercase)")
+    5     assert_equals(lexer:get_next_token().type, TokenType.BEGIN, "Lexer: BeGiN (mixed case)")
+    4     assert_equals(lexer:get_next_token().type, TokenType.END, "Lexer: eNd (mixed case)")
+          
+          -- Identifiers
+    3     lexer = Lexer.new("x y123 _var abc_123 _")
+    5     assert_equals(lexer:get_next_token().type, TokenType.ID, "Lexer: identifier x")
+    4     assert_equals(lexer:get_next_token().type, TokenType.ID, "Lexer: identifier y123")
+    4     assert_equals(lexer:get_next_token().type, TokenType.ID, "Lexer: identifier _var")
+    5     assert_equals(lexer:get_next_token().type, TokenType.ID, "Lexer: identifier abc_123")
+    5     assert_equals(lexer:get_next_token().type, TokenType.ID, "Lexer: identifier _")
+          
+          -- Whitespace handling
+    3     lexer = Lexer.new("  \t\n  123  \n  456  ")
+    6     local t1 = lexer:get_next_token()
+    5     assert_equals(t1.value, 123, "Lexer: whitespace before number")
+    5     local t2 = lexer:get_next_token()
+    5     assert_equals(t2.value, 456, "Lexer: whitespace between numbers")
+          
+          -- Multiple dots in real numbers
+    3     lexer = Lexer.new("3.14 2.5 0.0")
+    4     assert_equals(lexer:get_next_token().value, 3.14, "Lexer: real 3.14")
+   14     assert_equals(lexer:get_next_token().value, 2.5, "Lexer: real 2.5")
+   13     assert_equals(lexer:get_next_token().value, 0.0, "Lexer: real 0.0")
+          
+          -- Assignment with whitespace
+    2     lexer = Lexer.new(":  =")
+    4     local assign_token = lexer:get_next_token()
+    5     assert_equals(assign_token.type, TokenType.ASSIGN, "Lexer: := with spaces")
+          
+    3     lexer = Lexer.new(":\t\n =")
+    5     assign_token = lexer:get_next_token()
+    5     assert_equals(assign_token.type, TokenType.ASSIGN, "Lexer: := with tabs/newlines")
+          
+          -- Empty string
+    3     lexer = Lexer.new("")
+    4     assert_equals(lexer:get_next_token().type, TokenType.EOF, "Lexer: empty string EOF")
+          
+          -- Error cases
+    5     assert_error(function()
+    7         Lexer.new(123)
+    5     end, "Lexer: non-string input", "must be a string")
+          
+    5     assert_error(function()
+    6         local l = Lexer.new("@")
+    4         l:get_next_token()
+    5     end, "Lexer: invalid character @", "Unresolved symbol")
+          
+    4     assert_error(function()
+    6         local l = Lexer.new("#")
+    4         l:get_next_token()
+    4     end, "Lexer: invalid character #", "Unresolved symbol")
+          
+    4     assert_error(function()
+    6         local l = Lexer.new(": ")
+    4         l:get_next_token()
+    6     end, "Lexer: colon without equals", "expected '='")
+          
+    4     assert_error(function()
+    6         local l = Lexer.new(":x")
+    4         l:get_next_token()
+    4     end, "Lexer: colon followed by letter", "expected '='")
+          
+          -- Peek function test
+    2     lexer = Lexer.new("123")
+    4     assert_equals(lexer:peek(), "2", "Lexer: peek next char")
+    4     lexer:advance()
+    4     assert_equals(lexer:peek(), "3", "Lexer: peek after advance")
+    5     lexer:advance()
+    4     lexer:advance()
+    4     assert_equals(lexer:peek(), nil, "Lexer: peek at end")
+      end
+
+      local function test_parser()
+    2     print("\n=== Parser tests ===")
+    4     local Lexer = main.Lexer
+    4     local TokenType = main.TokenType
+    4     local AST = main.AST
+    4     local Parser = main.Parser
+          
+          -- Empty program
+    2     local lexer = Lexer.new("BEGIN END.")
+    4     local parser = Parser.new(lexer, TokenType, AST)
+    4     local ast = parser:parse()
+    4     assert_equals(ast.type, "Compound", "Parser: empty block")
+    4     assert_equals(#ast.children, 0, "Parser: empty block (children count)")
+          
+          -- Simple assignment
+    2     lexer = Lexer.new("BEGIN x := 5 END.")
+    4     parser = Parser.new(lexer, TokenType, AST)
+    4     ast = parser:parse()
+    4     assert_equals(ast.type, "Compound", "Parser: block with assignment")
+    4     assert_equals(#ast.children, 1, "Parser: one statement")
+    4     assert_equals(ast.children[1].type, "Assign", "Parser: assignment statement type")
+          
+          -- Arithmetic expression
+    2     lexer = Lexer.new("BEGIN x := 2 + 3 * 4 END.")
+    4     parser = Parser.new(lexer, TokenType, AST)
+    4     ast = parser:parse()
+    4     assert_equals(ast.children[1].right.type, "BinOp", "Parser: arithmetic expression")
+          
+          -- Multiple statements with semicolons
+    3     lexer = Lexer.new("BEGIN a := 1; b := 2; c := 3 END.")
+    4     parser = Parser.new(lexer, TokenType, AST)
+    4     ast = parser:parse()
+    6     assert_equals(#ast.children, 3, "Parser: three statements")
+          
+          -- Nested compound statements
+    2     lexer = Lexer.new("BEGIN BEGIN x := 1 END END.")
+    4     parser = Parser.new(lexer, TokenType, AST)
+    4     ast = parser:parse()
+    4     assert_equals(ast.type, "Compound", "Parser: outer compound")
+    4     assert_equals(ast.children[1].type, "Compound", "Parser: inner compound")
+          
+          -- Empty statements (NoOp)
+    2     lexer = Lexer.new("BEGIN ; ; END.")
+    4     parser = Parser.new(lexer, TokenType, AST)
+    4     ast = parser:parse()
+    4     assert_equals(#ast.children, 0, "Parser: empty statements filtered out")
+          
+          -- Parentheses in expressions
+    2     lexer = Lexer.new("BEGIN x := (1 + 2) * 3 END.")
+    5     parser = Parser.new(lexer, TokenType, AST)
+    4     ast = parser:parse()
+    5     assert_equals(ast.children[1].right.type, "BinOp", "Parser: parenthesized expression")
+          
+          -- Unary operators
+    3     lexer = Lexer.new("BEGIN x := -5 END.")
+    5     parser = Parser.new(lexer, TokenType, AST)
+    5     ast = parser:parse()
+    5     assert_equals(ast.children[1].right.type, "UnaryOp", "Parser: unary minus")
+          
+    2     lexer = Lexer.new("BEGIN x := +5 END.")
+    4     parser = Parser.new(lexer, TokenType, AST)
+    4     ast = parser:parse()
+    4     assert_equals(ast.children[1].right.type, "UnaryOp", "Parser: unary plus")
+          
+          -- Variable in expression
+    2     lexer = Lexer.new("BEGIN a := 1; b := a END.")
+    4     parser = Parser.new(lexer, TokenType, AST)
+    4     ast = parser:parse()
+    4     assert_equals(ast.children[2].right.type, "Var", "Parser: variable in expression")
+          
+          -- Complex expression with all operators
+    4     lexer = Lexer.new("BEGIN x := 1 + 2 - 3 * 4 / 5 END.")
+    4     parser = Parser.new(lexer, TokenType, AST)
+    4     ast = parser:parse()
+    4     assert_equals(ast.children[1].type, "Assign", "Parser: complex expression")
+          
+          -- Trailing semicolon
+    2     lexer = Lexer.new("BEGIN x := 1; END.")
+    4     parser = Parser.new(lexer, TokenType, AST)
+    4     ast = parser:parse()
+    4     assert_equals(#ast.children, 1, "Parser: trailing semicolon")
+          
+          -- Error cases
+    4     assert_error(function()
+    6         Parser.new("not a table", TokenType, AST)
+    4     end, "Parser: invalid lexer type", "must be a table")
+          
+    4     assert_error(function()
+    6         Parser.new({}, TokenType, AST)
+    4     end, "Parser: lexer without get_next_token", "must be a function")
+          
+    4     assert_error(function()
+    6         local l = Lexer.new("BEGIN x := 5")
+    4         local p = Parser.new(l, TokenType, AST)
+    4         p:parse()
+    4     end, "Parser: missing END", "Syntax Error")
+          
+    4     assert_error(function()
+    6         local l = Lexer.new("BEGIN END")
+    4         local p = Parser.new(l, TokenType, AST)
+    4         p:parse()
+    4     end, "Parser: missing DOT", "Syntax Error")
+          
+    4     assert_error(function()
+    6         local l = Lexer.new("BEGIN x = 5 END.")
+    4         local p = Parser.new(l, TokenType, AST)
+    4         p:parse()
+    4     end, "Parser: wrong assignment operator", "Unresolved symbol")
+          
+    4     assert_error(function()
+    2         local l = Lexer.new("BEGIN x := END.")
+    2         local p = Parser.new(l, TokenType, AST)
+    2         p:parse()
+    2     end, "Parser: incomplete assignment", "Syntax Error")
+          
+    4     assert_error(function()
+    2         local l = Lexer.new("BEGIN x := ( END.")
+    2         local p = Parser.new(l, TokenType, AST)
+    2         p:parse()
+    2     end, "Parser: unclosed parenthesis", "Syntax Error")
+          
+    4     assert_error(function()
+    2         local l = Lexer.new("BEGIN x := 5 END. extra")
+    2         local p = Parser.new(l, TokenType, AST)
+    2         p:parse()
+    4     end, "Parser: unexpected token after program", "Unexpected token")
+      end
+
+      local function test_interpreter()
+    2     print("\n=== Interpreter tests ===")
+          
+          -- Empty program
+    2     local result = interpret("BEGIN END.")
+    2     assert_table_equals(result, {}, "Interpreter: empty program")
+          
+          -- Simple assignment
+    2     result = interpret("BEGIN x := 5 END.")
+    2     assert_table_equals(result, {x = 5}, "Interpreter: simple assignment")
+          
+          -- Arithmetic operations
+    4     result = interpret("BEGIN x := 2 + 3 END.")
+    2     assert_table_equals(result, {x = 5}, "Interpreter: addition")
+          
+    3     result = interpret("BEGIN x := 10 - 3 END.")
+    2     assert_table_equals(result, {x = 7}, "Interpreter: subtraction")
+          
+    3     result = interpret("BEGIN x := 4 * 5 END.")
+    2     assert_table_equals(result, {x = 20}, "Interpreter: multiplication")
+          
+    2     result = interpret("BEGIN x := 20 / 4 END.")
+    2     assert_table_equals(result, {x = 5}, "Interpreter: division")
+          
+    2     result = interpret("BEGIN x := 15 / 2 END.")
+    3     assert_equals(result.x, 7.5, "Interpreter: division with decimal result")
+          
+          -- Operator precedence
+    2     result = interpret("BEGIN x := 2 + 3 * 4 END.")
+    3     assert_table_equals(result, {x = 14}, "Interpreter: operator precedence")
+          
+    2     result = interpret("BEGIN x := 2 * 3 + 4 END.")
+    3     assert_table_equals(result, {x = 10}, "Interpreter: operator precedence (reverse)")
+          
+    2     result = interpret("BEGIN x := 10 - 2 - 3 END.")
+    2     assert_table_equals(result, {x = 5}, "Interpreter: left associativity subtraction")
+          
+    4     result = interpret("BEGIN x := 20 / 4 / 2 END.")
+    4     assert_table_equals(result, {x = 2.5}, "Interpreter: left associativity division")
+          
+          -- Parentheses
+    4     result = interpret("BEGIN x := (2 + 3) * 4 END.")
+    4     assert_table_equals(result, {x = 20}, "Interpreter: parentheses")
+          
+    2     result = interpret("BEGIN x := 2 * (3 + 4) END.")
+    2     assert_table_equals(result, {x = 14}, "Interpreter: parentheses (reverse)")
+          
+    2     result = interpret("BEGIN x := ((1 + 2) * (3 + 4)) END.")
+    4     assert_table_equals(result, {x = 21}, "Interpreter: nested parentheses")
+          
+          -- Unary operators
+    2     result = interpret("BEGIN x := -5 END.")
+    2     assert_table_equals(result, {x = -5}, "Interpreter: unary minus")
+          
+    2     result = interpret("BEGIN x := +5 END.")
+    2     assert_table_equals(result, {x = 5}, "Interpreter: unary plus")
+          
+    2     result = interpret("BEGIN x := -(-5) END.")
+    2     assert_table_equals(result, {x = 5}, "Interpreter: double unary minus")
+          
+    2     result = interpret("BEGIN x := -(3 + 2) END.")
+    2     assert_table_equals(result, {x = -5}, "Interpreter: unary minus with expression")
+          
+    2     result = interpret("BEGIN x := 10 + -5 END.")
+    2     assert_table_equals(result, {x = 5}, "Interpreter: unary minus in expression")
+          
+          -- Multiple variables
+    2     result = interpret("BEGIN x := 1; y := 2; z := 3 END.")
+    2     assert_table_equals(result, {x = 1, y = 2, z = 3}, "Interpreter: multiple variables")
+          
+          -- Using variables
+    2     result = interpret("BEGIN x := 5; y := x + 3 END.")
+    2     assert_table_equals(result, {x = 5, y = 8}, "Interpreter: using variables")
+          
+    2     result = interpret("BEGIN x := 5; y := x; z := y END.")
+    2     assert_table_equals(result, {x = 5, y = 5, z = 5}, "Interpreter: variable chain")
+          
+    2     result = interpret("BEGIN x := 2; y := 3; z := x + y END.")
+    2     assert_table_equals(result, {x = 2, y = 3, z = 5}, "Interpreter: multiple variables in expression")
+          
+    2     result = interpret("BEGIN x := 2; x := x + 3 END.")
+    2     assert_table_equals(result, {x = 5}, "Interpreter: variable reassignment")
+          
+          -- Real numbers
+    2     result = interpret("BEGIN x := 3.14 END.")
+    2     assert_equals(result.x, 3.14, "Interpreter: real number")
+          
+    2     result = interpret("BEGIN x := 1.5 + 2.5 END.")
+    2     assert_equals(result.x, 4.0, "Interpreter: real number addition")
+          
+    2     result = interpret("BEGIN x := 10.0 / 4.0 END.")
+    2     assert_equals(result.x, 2.5, "Interpreter: real number division")
+          
+          -- Nested blocks
+    4     result = interpret([[
+              BEGIN
+                  x := 1;
+                  BEGIN
+                      y := 2
+                  END;
+                  z := 3
+              END.
+    4     ]])
+    2     assert_table_equals(result, {x = 1, y = 2, z = 3}, "Interpreter: nested blocks")
+          
+    4     result = interpret([[
+              BEGIN
+                  BEGIN
+                      BEGIN
+                          x := 1
+                      END
+                  END
+              END.
+    4     ]])
+    2     assert_table_equals(result, {x = 1}, "Interpreter: deeply nested blocks")
+          
+          -- Complex expressions
+    2     result = interpret("BEGIN x := 2 + 3 * 4 - 5 / 5 END.")
+    2     assert_equals(result.x, 13, "Interpreter: complex expression")
+          
+    2     result = interpret("BEGIN x := (2 + 3) * (4 - 1) END.")
+    2     assert_equals(result.x, 15, "Interpreter: multiple parenthesized groups")
+          
+          -- Error cases
+    4     assert_error(function()
+    2         interpret("BEGIN x := y END.")
+    2     end, "Interpreter: undefined variable", "undefined")
+          
+    4     assert_error(function()
+    2         interpret("BEGIN x := y + 1 END.")
+    2     end, "Interpreter: undefined variable in expression", "undefined")
+          
+    4     assert_error(function()
+    2         interpret("BEGIN a := b; b := 1 END.")
+    2     end, "Interpreter: using variable before definition", "undefined")
+
+          local function dummy_program(node_type)
+****0         return [[
+                  BEGIN
+                      x := 10
+                  END.
+****0         ]]
+          end
+          
+          local function mock_parse()
+    2         return {
+    2             type = "UnknownNodeType"
+    1         }
+          end
+
+          local function mock_lexer()
+    3         return {
+    1             get_next_token = function()
+    1                 return {type = main.TokenType.EOF, value = nil}
+                  end
+    1         }
+          end
+
+          local function mock_parser()
+    2         return {
+    2             parse = mock_parse
+    2         }
+          end
+
+    2     assert_error(function()
+    2         local interpreter = main.Interpreter.new(mock_parser(), main.TokenType)
+    2         interpreter:interpret()
+    2     end, "Interpreter: Undefined AST method", "Undefined methods visit_UnknownNodeType")
+
+    2     assert_error(function()
+    2         interpret("BEGIN y := x + 1 END.")
+    2     end, "Interpreter: Undefined variable", "Variable is undefined")
+
+    2     result = interpret("BEGIN f := 3.14 + 1.86 END.")
+    2     assert_equals(result.f, 5.0, "Interpreter: Real numbers addition")
+      end
+
+      local function test_ast()
+    1     print("\n=== AST tests ===")
+    2     local AST = main.AST
+    2     local TokenType = main.TokenType
+          
+    2     local token = {type = TokenType.INTEGER, value = 42}
+    1     local num_node = AST.Num(token)
+    1     assert_equals(num_node.type, "Num", "AST: Num type")
+    2     assert_equals(num_node.value, 42, "AST: Num value")
+          
+    3     local left = AST.Num({type = TokenType.INTEGER, value = 2})
+    5     local right = AST.Num({type = TokenType.INTEGER, value = 3})
+    1     local op = {type = TokenType.PLUS, value = "+"}
+    2     local binop_node = AST.BinOp(left, op, right)
+    1     assert_equals(binop_node.type, "BinOp", "AST: BinOp type")
+    2     assert_equals(binop_node.left.value, 2, "AST: BinOp left")
+    2     assert_equals(binop_node.right.value, 3, "AST: BinOp right")
+          
+          -- Test UnaryOp node
+    1     local expr = AST.Num({type = TokenType.INTEGER, value = 5})
+    1     local unary_op = {type = TokenType.MINUS, value = "-"}
+    1     local unaryop_node = AST.UnaryOp(unary_op, expr)
+    1     assert_equals(unaryop_node.type, "UnaryOp", "AST: UnaryOp type")
+    3     assert_equals(unaryop_node.expr.value, 5, "AST: UnaryOp expr")
+          
+          -- Test Compound node
+    1     local compound_node = AST.Compound()
+    3     assert_equals(compound_node.type, "Compound", "AST: Compound type")
+    1     assert_equals(#compound_node.children, 0, "AST: Compound empty children")
+          
+          -- Test Assign node
+    1     local var = AST.Var({type = TokenType.ID, value = "x"})
+    1     local assign_op = {type = TokenType.ASSIGN, value = ":="}
+    1     local value = AST.Num({type = TokenType.INTEGER, value = 10})
+    1     local assign_node = AST.Assign(var, assign_op, value)
+    1     assert_equals(assign_node.type, "Assign", "AST: Assign type")
+    1     assert_equals(assign_node.left.value, "x", "AST: Assign left")
+    1     assert_equals(assign_node.right.value, 10, "AST: Assign right")
+          
+          -- Test Var node
+    2     local var_token = {type = TokenType.ID, value = "myvar"}
+    2     local var_node = AST.Var(var_token)
+    2     assert_equals(var_node.type, "Var", "AST: Var type")
+    2     assert_equals(var_node.value, "myvar", "AST: Var value")
+          
+          -- Test NoOp node
+    1     local noop_node = AST.NoOp()
+    2     assert_equals(noop_node.type, "NoOp", "AST: NoOp type")
+      end
+
+      local function test_examples()
+    2     print("\n=== Assignment examples tests ===")
+          
+    1     local result = interpret("BEGIN END.")
+    2     assert_table_equals(result, {}, "Example 1: empty program")
+          
+    2     result = interpret([[
+              BEGIN
+                  x:= 2 + 3 * (2 + 3);
+                  y:= 2 / 2 - 2 + 3 * ((1 + 1) + (1 + 1))
+              END.
+    2     ]])
+    1     assert_equals(result.x, 17, "Example 2: x")
+    2     assert_equals(result.y, 11, "Example 2: y")
+          
+    2     result = interpret([[
+              BEGIN
+                  y: = 2;
+                  BEGIN
+                      a := 3;
+                      a := a;
+                      b := 10 + a + 10 * y / 4;
+                      c := a - b
+                  END;
+                  x := 11
+              END.
+    3     ]])
+    1     assert_equals(result.y, 2, "Example 3: y")
+    1     assert_equals(result.a, 3, "Example 3: a")
+    3     assert_equals(result.b, 18, "Example 3: b")
+    1     assert_equals(result.c, -15, "Example 3: c")
+    1     assert_equals(result.x, 11, "Example 3: x")
+      end
+
+      local function test_edge_cases()
+    1     print("\n=== Edge cases tests ===")
+          
+          -- Single character identifiers
+    1     local result = interpret("BEGIN a := 1; b := 2; c := a + b END.")
+    1     assert_equals(result.c, 3, "Edge: single char identifiers")
+          
+          -- Long identifier names
+    3     result = interpret("BEGIN very_long_variable_name := 100 END.")
+    5     assert_equals(result.very_long_variable_name, 100, "Edge: long identifier")
+          
+          -- Zero values
+    3     result = interpret("BEGIN x := 0; y := 0.0 END.")
+    3     assert_equals(result.x, 0, "Edge: integer zero")
+    6     assert_equals(result.y, 0.0, "Edge: real zero")
+          
+          -- Large numbers
+    2     result = interpret("BEGIN x := 999999 END.")
+    2     assert_equals(result.x, 999999, "Edge: large integer")
+          
+          -- Many operations
+    3     result = interpret("BEGIN x := 1+1+1+1+1+1+1+1+1+1 END.")
+    2     assert_equals(result.x, 10, "Edge: many additions")
+          
+          -- Deep nesting
+    1     result = interpret("BEGIN x := ((((1)))) END.")
+    1     assert_equals(result.x, 1, "Edge: deep parentheses nesting")
+          
+          -- Empty statements between real ones
+    2     result = interpret("BEGIN ; x := 1 ; ; y := 2 ; END.")
+    5     assert_table_equals(result, {x = 1, y = 2}, "Edge: empty statements mixed")
+          
+          -- Complex nested blocks
+    6     result = interpret([[
+              BEGIN
+                  a := 1;
+                  BEGIN
+                      b := 2;
+                      BEGIN
+                          c := 3;
+                          d := a + b + c
+                      END
+                  END
+              END.
+    2     ]])
+    1     assert_equals(result.d, 6, "Edge: variables from outer scopes")
+      end
+
+      local function run_all_tests()
+    2     print("Running Pascal Interpreter Tests")
+          
+    2     local success, err = pcall(function()
+    2         test_lexer()
+    2         test_parser()
+    1         test_interpreter()
+    2         test_ast()
+    4         test_examples()
+    1         test_edge_cases()
+          end)
+          
+    3     print("\n" .. string.rep("=", 40))
+    3     if success then
+    3         print("SUCCESS: All tests passed!")
+          else
+    2         print("ERROR: Test execution failed:")
+    2         print(err)
+          end
+    3     print(string.rep("=", 40))
+      end
+
+    1 run_all_tests()
+
+==============================================================================
+Summary
+==============================================================================
+
+File            Hits Missed Coverage
+------------------------------------
+ast.lua         43   0      100.00%
+interpreter.lua 52   0      100.00%
+lexer.lua       111  0      100.00%
+main.lua        19   5      79.17%
+parser.lua      107  0      100.00%
+run.lua         26   2      92.86%
+tests.lua       369  7      98.14%
+------------------------------------
+Total           727  14     98.11%
