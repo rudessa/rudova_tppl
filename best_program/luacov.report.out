@@ -1,0 +1,556 @@
+==============================================================================
+main.lua
+==============================================================================
+***0 local LIB_ROOT = "D:\\lualibs_windows\\" 
+
+***0 package.cpath = package.cpath .. ";" .. LIB_ROOT .. "luasocket\\?.dll"
+***0 package.cpath = package.cpath .. ";" .. LIB_ROOT .. "luasocket\\mime\\?.dll"
+***0 package.path = package.path .. ";" .. LIB_ROOT .. "luasocket\\?.lua"
+
+***0 local socket_ok, socket = pcall(require, "socket")
+***0 if not socket_ok then
+***0     print("ERROR: Failed to load socket library")
+***0     print("Details: " .. tostring(socket))
+***0     print("\nPlease check:")
+***0     print("1. Library path: " .. LIB_ROOT)
+***0     print("2. File exists: " .. LIB_ROOT .. "luasocket\\socket.dll")
+***0     print("3. Lua version compatibility")
+***0     os.exit(1)
+     end
+
+***0 if not (arg and arg[1] == "--test") then
+***0     print("Socket library loaded successfully")
+     end
+
+***0 local os = require("os")
+
+***0 CONFIG = {
+         host = "95.163.237.76",
+         port1 = 5123,
+         port2 = 5124,
+         secret_key = "isu_pt",
+         get_command = "get",
+         output_file = "sensor_data.txt",
+         timeout = 4.0,           
+         reconnect_delay = 0.5,   
+         request_interval = 0.0,  
+         debug_mode = false,
+         max_consecutive_errors = 1,
+***0     auth_pause = 0.2
+     }
+
+***0 if not (arg and arg[1] == "--test") then
+***0     print(string.format("Host: %s", CONFIG.host))
+***0     print(string.format("Ports: %d, %d", CONFIG.port1, CONFIG.port2))
+***0     print(string.format("Immediate reconnect on checksum error: %s", CONFIG.max_consecutive_errors == 1 and "YES" or "NO"))
+***0     print()
+     end
+
+***0 function bytes_to_uint64_be(data, offset)
+   5     offset = offset or 1
+   5     local result = 0
+  45     for i = 0, 7 do
+  40         result = result * 256 + data:byte(offset + i)
+         end
+   5     return result
+     end
+
+***0 function bytes_to_float_be(data, offset)
+   8     offset = offset or 1
+   8     local b1, b2, b3, b4 = data:byte(offset, offset + 3)
+         
+   8     local sign = (b1 >= 128) and -1 or 1
+   8     local exponent_bits = ((b1 % 128) * 2) + math.floor(b2 / 128)
+   8     local mantissa_bits = ((b2 % 128) * 65536) + (b3 * 256) + b4
+   8     local mantissa = mantissa_bits / 8388608.0
+   8     local exponent = exponent_bits - 127
+         
+   8     if exponent_bits == 0 and mantissa_bits == 0 then
+   1         return 0.0
+   7     elseif exponent_bits == 255 then
+   3         return mantissa_bits == 0 and (sign * math.huge) or (0/0)
+         end
+         
+   4     local fractional_part = 1.0 + mantissa
+   4     local factor = 2 ^ exponent
+   4     return sign * fractional_part * factor
+     end
+
+***0 function bytes_to_int16_be(data, offset)
+   6     offset = offset or 1
+   6     local b1, b2 = data:byte(offset, offset + 1)
+   6     local value = b1 * 256 + b2
+   6     if value >= 32768 then
+   2         value = value - 65536
+         end
+   6     return value
+     end
+
+***0 function bytes_to_int32_be(data, offset)
+   8     offset = offset or 1
+   8     local b1, b2, b3, b4 = data:byte(offset, offset + 3)
+   8     local value = b1 * 16777216 + b2 * 65536 + b3 * 256 + b4
+   8     if value >= 2147483648 then
+   2         value = value - 4294967296
+         end
+   8     return value
+     end
+
+***0 function calculate_checksum(data)
+  11     local sum = 0
+ 152     for i = 1, #data do
+ 141         sum = sum + data:byte(i)
+         end
+  11     return sum % 256 
+     end
+
+***0 function timestamp_to_datetime(timestamp_us)
+   5     local timestamp_s = timestamp_us / 1000000 
+   5     local success, result = pcall(os.date, "!%Y-%m-%d %H:%M:%S", math.floor(timestamp_s))
+         
+   5     if success and type(result) == "string" then
+   4         return result
+         else
+   1         return string.format("RAW_TIME(s): %d", math.floor(timestamp_s))
+         end
+     end
+
+***0 function debug_print_bytes(data, name)
+  10     if not CONFIG.debug_mode then return end
+   5     local hex = {}
+  77     for i = 1, math.min(#data, 32) do
+  72         hex[i] = string.format("%02X", data:byte(i))
+         end
+  10     print(string.format("[DEBUG %s] Length: %d, Bytes: %s%s", 
+   5         name, #data, table.concat(hex, " "), #data > 32 and "..." or ""))
+     end
+
+***0 Connection = {}
+***0 Connection.__index = Connection
+
+***0 function Connection:new(port, data_size, name)
+  20     local obj = {
+  20         port = port,
+  20         data_size = data_size,
+  20         name = name,
+  20         sock = nil,
+  20         connected = false,
+  20         last_request_time = 0,
+  20         connection_attempts = 0,
+  20         consecutive_errors = 0  
+         }
+  20     setmetatable(obj, self)
+  20     return obj
+     end
+
+***0 function Connection:receive_exact()
+   4     local buffer = ""
+   4     local received_len = 0
+   4     local size = self.data_size
+         
+   6     while received_len < size do
+   4         local data, err = self.sock:receive(size - received_len)
+             
+   4         if not data then
+   2             self.connected = false
+   2             return nil, err
+             end
+             
+   2         buffer = buffer .. data
+   2         received_len = received_len + #data
+         end
+   2     return buffer
+     end
+
+***0 function Connection:connect()
+   5     self.connection_attempts = self.connection_attempts + 1
+         
+   5     if self.sock then
+***0         pcall(function() self.sock:close() end)
+***0         self.sock = nil
+         end
+         
+   5     if CONFIG.debug_mode then
+   2         print(string.format("[%s] Connection attempt #%d to %s:%d...", 
+   1             self.name, self.connection_attempts, CONFIG.host, self.port))
+         end
+         
+   5     self.sock = socket.tcp()
+   5     if not self.sock then
+   1         print(string.format("[%s] Socket creation failed", self.name))
+   1         return false
+         end
+         
+   4     self.sock:settimeout(CONFIG.timeout)
+         
+   4     local success, err = self.sock:connect(CONFIG.host, self.port)
+   4     if not success then
+   1         print(string.format("[%s] Connection error: %s", self.name, err or "unknown"))
+   1         self.connected = false
+   1         return false
+         end
+         
+   3     if CONFIG.debug_mode then
+   1         print(string.format("[%s] TCP connection established", self.name))
+         end
+         
+   3     local sent, err = self.sock:send(CONFIG.secret_key)
+   3     if not sent then
+   1         print(string.format("[%s] Failed to send key: %s", self.name, err or "unknown"))
+   1         self.connected = false
+   1         return false
+         end
+         
+   2     if CONFIG.debug_mode then
+   1         print(string.format("[%s] Secret key sent (%d bytes)", self.name, #CONFIG.secret_key))
+         end
+         
+   2     self.sock:settimeout(0.3)
+         
+   2     local auth_data = ""
+   2     local attempts = 0
+  12     while attempts < 5 do
+  10         local chunk, err = self.sock:receive(1)
+  10         if chunk then
+***0             auth_data = auth_data .. chunk
+***0             attempts = 0
+             else
+  10             attempts = attempts + 1
+  10             socket.sleep(0.01)
+             end
+             
+  10         if #auth_data >= 7 then
+                 break
+             end
+         end
+         
+   2     if CONFIG.debug_mode and #auth_data > 0 then
+***0         local hex = {}
+***0         for i = 1, #auth_data do
+***0             hex[i] = string.format("%02X", auth_data:byte(i))
+             end
+***0         print(string.format("[%s] Auth data cleared (%d bytes): %s => %q", 
+***0             self.name, #auth_data, table.concat(hex, " "), auth_data))
+         end
+         
+   2     socket.sleep(CONFIG.auth_pause)
+         
+   2     self.sock:settimeout(CONFIG.timeout)
+         
+   2     self.connected = true
+   2     self.consecutive_errors = 0  
+   2     print(string.format("[%s] CONNECTED & READY", self.name))
+   2     self.connection_attempts = 0
+   2     return true
+     end
+
+***0 function Connection:request_and_receive()
+   4     if not self.connected then
+   1         return nil, "not connected"
+         end
+         
+   3     local sent, err = self.sock:send(CONFIG.get_command)
+   3     if not sent then
+   1         self.connected = false
+   1         self.consecutive_errors = self.consecutive_errors + 1
+   1         return nil, "send error: " .. (err or "unknown")
+         end
+         
+   2     local data, err = self:receive_exact()
+         
+   2     if not data then
+   1         self.connected = false
+   1         self.consecutive_errors = self.consecutive_errors + 1
+   1         return nil, "receive error: " .. (err or "unknown")
+         end
+         
+   1     self.last_request_time = socket.gettime()
+   1     return data
+     end
+
+***0 function Connection:mark_success()
+   1     self.consecutive_errors = 0
+     end
+
+***0 function Connection:mark_error()
+   3     self.consecutive_errors = self.consecutive_errors + 1
+     end
+
+***0 function Connection:should_reconnect()
+   2     return self.consecutive_errors >= CONFIG.max_consecutive_errors
+     end
+
+***0 function Connection:force_reconnect(reason)
+   2     if CONFIG.debug_mode then
+   1         print(string.format("[%s] RECONNECTING: %s", self.name, reason))
+         end
+   2     self:close()
+   2     self.consecutive_errors = 0
+     end
+
+***0 function Connection:close()
+   4     if self.sock then
+   6         pcall(function() self.sock:close() end)
+   3         self.sock = nil
+         end
+   4     self.connected = false
+     end
+
+***0 function parse_server1_data(data)
+   4     if #data ~= 15 then
+   1         return nil, string.format("invalid data length: %d (expected 15)", #data)
+         end
+         
+   3     debug_print_bytes(data, "Server1")
+         
+   3     local payload = data:sub(1, 14)
+   3     local checksum = data:byte(15)
+   3     local calculated = calculate_checksum(payload)
+         
+   3     if calculated ~= checksum then
+   2         if CONFIG.debug_mode then
+   1             print(string.format("[Server1] Checksum error: got %d, calculated %d", checksum, calculated))
+             end
+   2         return nil, string.format("checksum error: got %d, calculated %d", checksum, calculated)
+         end
+         
+   1     local timestamp = bytes_to_uint64_be(data, 1)
+   1     local temperature = bytes_to_float_be(data, 9)
+   1     local pressure = bytes_to_int16_be(data, 13)
+         
+   1     return {
+   1         timestamp = timestamp,
+   1         datetime = timestamp_to_datetime(timestamp),
+   1         temperature = temperature,
+   1         pressure = pressure,
+   1         source = "Server1"
+   1     }
+     end
+
+***0 function parse_server2_data(data)
+   4     if #data ~= 21 then
+   1         return nil, string.format("invalid data length: %d (expected 21)", #data)
+         end
+         
+   3     debug_print_bytes(data, "Server2")
+         
+   3     local payload = data:sub(1, 20)
+   3     local checksum = data:byte(21)
+   3     local calculated = calculate_checksum(payload)
+         
+   3     if calculated ~= checksum then
+   2         if CONFIG.debug_mode then
+   1             print(string.format("[Server2] Checksum error: got %d, calculated %d", checksum, calculated))
+             end
+   2         return nil, string.format("checksum error: got %d, calculated %d", checksum, calculated)
+         end
+         
+   1     local timestamp = bytes_to_uint64_be(data, 1)
+   1     local x = bytes_to_int32_be(data, 9)
+   1     local y = bytes_to_int32_be(data, 13)
+   1     local z = bytes_to_int32_be(data, 17)
+         
+   1     return {
+   1         timestamp = timestamp,
+   1         datetime = timestamp_to_datetime(timestamp),
+   1         x = x,
+   1         y = y,
+   1         z = z,
+   1         source = "Server2"
+   1     }
+     end
+
+***0 function write_to_file(file, data)
+   2     if data.source == "Server1" then
+   2         file:write(string.format("%s | %s | Temp: %.2f°C | Press: %d Pa\n",
+   2             data.datetime, data.source, data.temperature, data.pressure))
+         else
+   2         file:write(string.format("%s | %s | X: %d | Y: %d | Z: %d\n",
+   1             data.datetime, data.source, data.x, data.y, data.z))
+         end
+   2     file:flush()
+     end
+
+***0 function main()
+***0     print("\n" .. string.rep("=", 50))
+***0     print("  DATA COLLECTION FROM TWO SERVERS")
+***0     print(string.rep("=", 50))
+***0     print("Press Ctrl+C to stop the program\n")
+         
+***0     local file = io.open(CONFIG.output_file, "a")
+***0     if not file then
+***0         print("CRITICAL ERROR: Failed to open file for writing: " .. CONFIG.output_file)
+***0         return
+         end
+         
+***0     print("Output file opened: " .. CONFIG.output_file)
+         
+***0     file:write(string.format("\n%s\n", string.rep("=", 60)))
+***0     file:write(string.format("SESSION START: %s\n", os.date("%Y-%m-%d %H:%M:%S")))
+***0     file:write(string.format("%s\n\n", string.rep("=", 60)))
+***0     file:flush()
+         
+***0     local conn1 = Connection:new(CONFIG.port1, 15, "Server1")
+***0     local conn2 = Connection:new(CONFIG.port2, 21, "Server2")
+         
+         local function cleanup_and_exit()
+***0         print("\n\nGraceful Shutdown")
+***0         conn1:close()
+***0         conn2:close()
+***0         if file then
+***0             local current_time = os.date("%Y-%m-%d %H:%M:%S")
+***0             file:write(string.format("\n%s\n", string.rep("=", 60)))
+***0             file:write(string.format("SESSION END: %s\n", current_time))
+***0             file:write(string.format("%s\n", string.rep("=", 60)))
+***0             file:close()
+             end
+***0         print("Sockets and file closed.")
+***0         os.exit(0)
+         end
+
+***0     local stats = {
+             server1_count = 0,
+             server2_count = 0,
+             server1_errors = 0,
+             server2_errors = 0,
+             server1_reconnects = 0,
+             server2_reconnects = 0,
+             start_time = os.time(),
+***0         last_stats_time = os.time()
+         }
+         
+***0     print("\nStarting main data collection loop")
+***0     print("Checksum errors will trigger immediate reconnection\n")
+         
+         local function data_loop()
+***0         if not conn1.connected then conn1:connect() end
+***0         if not conn2.connected then conn2:connect() end
+             
+             while true do
+***0             local process_count = 0
+                 
+***0             if conn1:should_reconnect() then
+***0                 stats.server1_reconnects = stats.server1_reconnects + 1
+***0                 conn1:force_reconnect("checksum error detected")
+                 end
+                 
+***0             if conn1.connected then
+***0                 local data, err = conn1:request_and_receive()
+***0                 if data then
+***0                     local parsed, parse_err = parse_server1_data(data)
+***0                     if parsed then
+***0                         write_to_file(file, parsed)
+***0                         conn1:mark_success() 
+***0                         stats.server1_count = stats.server1_count + 1
+***0                         process_count = process_count + 1
+***0                         if stats.server1_count % 100 == 0 then
+***0                             print(string.format("[Server1] Records: %d", stats.server1_count))
+                             end
+                         else
+***0                         conn1:mark_error()
+***0                         stats.server1_errors = stats.server1_errors + 1
+***0                         print(string.format("[Server1] Checksum error → reconnecting"))
+                         end
+***0                 elseif err ~= "timeout" then
+***0                     stats.server1_errors = stats.server1_errors + 1
+***0                     if CONFIG.debug_mode then
+***0                         print(string.format("[Server1] Error: %s", err))
+                         end
+***0                     conn1:close()
+                     end
+                 else
+***0                 if not conn1:connect() then
+***0                     socket.sleep(CONFIG.reconnect_delay)
+                     end
+                 end
+                 
+***0             if conn2:should_reconnect() then
+***0                 stats.server2_reconnects = stats.server2_reconnects + 1
+***0                 conn2:force_reconnect("checksum error detected")
+                 end
+                 
+***0             if conn2.connected then
+***0                 local data, err = conn2:request_and_receive()
+***0                 if data then
+***0                     local parsed, parse_err = parse_server2_data(data)
+***0                     if parsed then
+***0                         write_to_file(file, parsed)
+***0                         conn2:mark_success()  
+***0                         stats.server2_count = stats.server2_count + 1
+***0                         process_count = process_count + 1
+***0                         if stats.server2_count % 100 == 0 then
+***0                             print(string.format("[Server2] Records: %d", stats.server2_count))
+                             end
+                         else
+***0                         conn2:mark_error()
+***0                         stats.server2_errors = stats.server2_errors + 1
+***0                         print(string.format("[Server2] Checksum error → reconnecting"))
+                         end
+***0                 elseif err ~= "timeout" then
+***0                     stats.server2_errors = stats.server2_errors + 1
+***0                     if CONFIG.debug_mode then
+***0                         print(string.format("[Server2] Error: %s", err))
+                         end
+***0                     conn2:close()
+                     end
+                 else
+***0                 if not conn2:connect() then
+***0                     socket.sleep(CONFIG.reconnect_delay)
+                     end
+                 end
+                 
+***0             local current_time_os = os.time()
+***0             if current_time_os - stats.last_stats_time >= 60 then
+***0                 local runtime = current_time_os - stats.start_time
+***0                 local rate1 = runtime > 0 and stats.server1_count / runtime or 0
+***0                 local rate2 = runtime > 0 and stats.server2_count / runtime or 0
+                     
+***0                 print(string.format("\n%s STATISTICS %s", string.rep("=", 12), string.rep("=", 12)))
+***0                 print(string.format("Runtime: %d sec (%.1f min)", runtime, runtime / 60))
+***0                 print(string.format("Server1: %d records, %d errors, %d reconnects (%.1f/sec)", 
+***0                     stats.server1_count, stats.server1_errors, stats.server1_reconnects, rate1))
+***0                 print(string.format("Server2: %d records, %d errors, %d reconnects (%.1f/sec)", 
+***0                     stats.server2_count, stats.server2_errors, stats.server2_reconnects, rate2))
+***0                 print(string.format("Total: %d records", stats.server1_count + stats.server2_count))
+***0                 print(string.rep("=", 37) .. "\n")
+                     
+***0                 stats.last_stats_time = current_time_os
+                 end
+                 
+***0             if process_count == 0 then
+***0                 socket.sleep(CONFIG.request_interval > 0 and CONFIG.request_interval or 0.001)
+                 end
+             end
+         end
+
+***0     local status, err = pcall(data_loop)
+***0     if not status then
+***0         if string.find(tostring(err), "closed") or string.find(tostring(err), "interrupted") then
+***0             cleanup_and_exit()
+             else
+***0             print("\nCRITICAL RUNTIME ERROR")
+***0             print("Details: " .. tostring(err))
+***0             print("\nStack trace:")
+***0             print(debug.traceback())
+***0             cleanup_and_exit()
+             end
+         end
+     end
+
+***0 if arg and arg[1] == "--test" then
+***0     require('luacov')
+   1     dofile('test.lua')
+     else
+***0     main()
+***0     print("\nProgram terminated.")
+     end
+
+==============================================================================
+Summary
+==============================================================================
+
+File     Hits Missed Coverage
+-----------------------------
+main.lua 183  164    52.74%
+-----------------------------
+Total    183  164    52.74%

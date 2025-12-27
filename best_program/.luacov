@@ -1,0 +1,8 @@
+modules = {
+  ["main"] = "main.lua"
+}
+exclude = {
+  "test",
+  "pcall",
+  "require"
+}
